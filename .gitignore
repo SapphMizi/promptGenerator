@@ -1,0 +1,13 @@
+/vendor/
+/composer.lock
+/.idea/
+/.vscode/
+
+config/config.php
+/.env
+
+public/uploads/
+public/generated/
+logs/
+
+
