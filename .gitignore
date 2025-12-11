@@ -6,8 +6,21 @@
 config/config.php
 /.env
 
-public/uploads/
-public/generated/
+# 画像ファイルのみを無視（ディレクトリ自体は追跡）
+public/uploads/**/*.png
+public/uploads/**/*.jpg
+public/uploads/**/*.jpeg
+public/uploads/**/*.gif
+public/uploads/**/*.webp
+public/uploads/**/*.bmp
+public/uploads/**/*.svg
+public/generated/**/*.png
+public/generated/**/*.jpg
+public/generated/**/*.jpeg
+public/generated/**/*.gif
+public/generated/**/*.webp
+public/generated/**/*.bmp
+public/generated/**/*.svg
 logs/
 
 

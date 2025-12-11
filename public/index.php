@@ -93,6 +93,7 @@ if ($method === 'POST') {
                     $prismConfig = [
                         'max_iterations' => $_POST['max_iterations'] ?? 5,
                         'similarity_threshold' => $_POST['similarity_threshold'] ?? 0.85,
+                        'parallel_count' => $_POST['parallel_count'] ?? 1,
                         'output_dir' => __DIR__ . '/generated'
                     ];
                     $prismEngine = new PrismEngine($openaiClient, $similarityCalculator, $prismConfig);
@@ -109,6 +110,15 @@ if ($method === 'POST') {
                     foreach ($prismResult['history'] as &$item) {
                         if (isset($item['image_path'])) {
                             $item['image_url'] = 'generated/' . basename($item['image_path']);
+                        }
+                        // 並列探索の結果がある場合、各結果の画像パスも変換
+                        if (isset($item['results']) && is_array($item['results'])) {
+                            foreach ($item['results'] as &$result) {
+                                if (isset($result['image_path'])) {
+                                    $result['image_url'] = 'generated/' . basename($result['image_path']);
+                                }
+                            }
+                            unset($result);
                         }
                     }
                     unset($item);
@@ -323,6 +333,11 @@ if ($method === 'POST') {
                 <label for="similarity_threshold">類似度閾値（0.0-1.0）</label>
                 <input type="number" id="similarity_threshold" name="similarity_threshold" value="0.85" min="0" max="1" step="0.05" style="width: 100px; padding: 8px; background: #020617; border-radius: 8px; border: 1px solid #1e293b; color: #e5e7eb;">
             </div>
+            <div class="form-group">
+                <label for="parallel_count">並列探索数（N）</label>
+                <input type="number" id="parallel_count" name="parallel_count" value="1" min="1" max="10" style="width: 100px; padding: 8px; background: #020617; border-radius: 8px; border: 1px solid #1e293b; color: #e5e7eb;">
+                <div style="font-size: 0.75rem; color: #64748b; margin-top: 4px;">各反復で並列に探索するプロンプトの数</div>
+            </div>
             <button type="submit" class="btn-submit" <?= $isProcessing ? 'disabled' : '' ?>>
                 <?= $isProcessing ? '処理中...' : '画像からプロンプトを生成' ?>
             </button>
@@ -358,6 +373,9 @@ if ($method === 'POST') {
                     <div style="margin-top: 12px; font-size: 0.85rem; color: #94a3b8;">
                         類似度スコア: <?= number_format($prismResult['best_similarity'], 3) ?> | 
                         反復回数: <?= $prismResult['total_iterations'] ?>
+                        <?php if (isset($prismResult['parallel_count']) && $prismResult['parallel_count'] > 1): ?>
+                            | 並列探索数: <?= $prismResult['parallel_count'] ?>
+                        <?php endif; ?>
                     </div>
                     
                     <?php if (!empty($prismResult['history']) && count($prismResult['history']) > 1): ?>
@@ -367,26 +385,89 @@ if ($method === 'POST') {
                             </div>
                             <div style="max-height: 400px; overflow-y: auto;">
                                 <?php foreach ($prismResult['history'] as $item): ?>
-                                    <div style="margin-bottom: 16px; padding: 12px; background: rgba(15, 23, 42, 0.6); border-radius: 8px; border: 1px solid #1e293b;">
-                                        <div style="font-size: 0.8rem; color: #64748b; margin-bottom: 6px;">
-                                            反復 <?= $item['iteration'] ?> 
-                                            <?php if ($item['type'] === 'initial'): ?>
-                                                (初期プロンプト)
-                                            <?php elseif (isset($item['similarity'])): ?>
-                                                (類似度: <?= number_format($item['similarity'], 3) ?>)
-                                            <?php elseif (isset($item['error'])): ?>
-                                                <span style="color: #f87171;">(エラー: <?= htmlspecialchars($item['error'], ENT_QUOTES, 'UTF-8') ?>)</span>
+                                    <?php if ($item['type'] === 'initial'): ?>
+                                        <div style="margin-bottom: 16px; padding: 12px; background: rgba(15, 23, 42, 0.6); border-radius: 8px; border: 1px solid #1e293b;">
+                                            <div style="font-size: 0.8rem; color: #64748b; margin-bottom: 6px;">
+                                                反復 <?= $item['iteration'] ?> (初期プロンプト)
+                                                <?php if (isset($item['parallel_count']) && $item['parallel_count'] > 1): ?>
+                                                    <span style="color: #38bdf8;">（並列数: <?= $item['parallel_count'] ?>）</span>
+                                                <?php endif; ?>
+                                            </div>
+                                            <div style="font-size: 0.85rem; line-height: 1.5; white-space: pre-wrap; word-break: break-word;">
+                                                <?= htmlspecialchars($item['prompt'] ?? '', ENT_QUOTES, 'UTF-8') ?>
+                                            </div>
+                                        </div>
+                                    <?php elseif (isset($item['results'])): ?>
+                                        <!-- 並列探索の結果表示 -->
+                                        <div style="margin-bottom: 16px; padding: 12px; background: rgba(15, 23, 42, 0.6); border-radius: 8px; border: 1px solid #1e293b;">
+                                            <div style="font-size: 0.8rem; color: #64748b; margin-bottom: 8px;">
+                                                反復 <?= $item['iteration'] ?> 
+                                                <?php if (isset($item['parallel_count']) && $item['parallel_count'] > 1): ?>
+                                                    <span style="color: #38bdf8;">（並列探索: <?= $item['parallel_count'] ?>件）</span>
+                                                <?php endif; ?>
+                                            </div>
+                                            <?php 
+                                            // 類似度でソート
+                                            $sortedResults = $item['results'];
+                                            usort($sortedResults, function($a, $b) {
+                                                return ($b['similarity'] ?? 0) <=> ($a['similarity'] ?? 0);
+                                            });
+                                            foreach ($sortedResults as $result): 
+                                                $resultImageUrl = isset($result['image_path']) ? 'generated/' . basename($result['image_path']) : null;
+                                            ?>
+                                                <div style="margin-bottom: 12px; padding: 10px; background: rgba(2, 6, 23, 0.6); border-radius: 6px; border-left: 3px solid #38bdf8;">
+                                                    <div style="font-size: 0.75rem; color: #94a3b8; margin-bottom: 6px;">
+                                                        プロンプト #<?= $result['index'] + 1 ?> - 類似度: <strong style="color: #38bdf8;"><?= number_format($result['similarity'] ?? 0, 3) ?></strong>
+                                                    </div>
+                                                    <?php if ($resultImageUrl): ?>
+                                                        <div style="margin-bottom: 8px;">
+                                                            <img src="<?= htmlspecialchars($resultImageUrl, ENT_QUOTES, 'UTF-8') ?>" alt="生成画像" style="max-width: 150px; border-radius: 4px; border: 1px solid #1e293b;">
+                                                        </div>
+                                                    <?php endif; ?>
+                                                    <div style="font-size: 0.8rem; line-height: 1.5; white-space: pre-wrap; word-break: break-word; color: #e5e7eb;">
+                                                        <?= htmlspecialchars($result['prompt'] ?? '', ENT_QUOTES, 'UTF-8') ?>
+                                                    </div>
+                                                </div>
+                                            <?php endforeach; ?>
+                                            <?php if (!empty($item['errors'])): ?>
+                                                <div style="margin-top: 8px; padding: 8px; background: rgba(248, 113, 113, 0.1); border-radius: 4px; border-left: 3px solid #f87171;">
+                                                    <div style="font-size: 0.75rem; color: #fecaca;">
+                                                        <strong>エラー:</strong>
+                                                        <?php foreach ($item['errors'] as $error): ?>
+                                                            <div>プロンプト #<?= $error['index'] + 1 ?>: <?= htmlspecialchars($error['error'], ENT_QUOTES, 'UTF-8') ?></div>
+                                                        <?php endforeach; ?>
+                                                    </div>
+                                                </div>
                                             <?php endif; ?>
                                         </div>
-                                        <?php if (isset($item['image_url'])): ?>
-                                            <div style="margin-bottom: 8px;">
-                                                <img src="<?= htmlspecialchars($item['image_url'], ENT_QUOTES, 'UTF-8') ?>" alt="生成画像" style="max-width: 200px; border-radius: 4px; border: 1px solid #1e293b;">
+                                    <?php elseif (isset($item['error'])): ?>
+                                        <div style="margin-bottom: 16px; padding: 12px; background: rgba(248, 113, 113, 0.1); border-radius: 8px; border: 1px solid rgba(248, 113, 113, 0.4);">
+                                            <div style="font-size: 0.8rem; color: #f87171; margin-bottom: 6px;">
+                                                反復 <?= $item['iteration'] ?> - エラー
                                             </div>
-                                        <?php endif; ?>
-                                        <div style="font-size: 0.85rem; line-height: 1.5; white-space: pre-wrap; word-break: break-word;">
-                                            <?= htmlspecialchars($item['prompt'] ?? '', ENT_QUOTES, 'UTF-8') ?>
+                                            <div style="font-size: 0.85rem; color: #fecaca;">
+                                                <?= htmlspecialchars($item['error'], ENT_QUOTES, 'UTF-8') ?>
+                                            </div>
                                         </div>
-                                    </div>
+                                    <?php else: ?>
+                                        <!-- 後方互換性のための旧形式の表示 -->
+                                        <div style="margin-bottom: 16px; padding: 12px; background: rgba(15, 23, 42, 0.6); border-radius: 8px; border: 1px solid #1e293b;">
+                                            <div style="font-size: 0.8rem; color: #64748b; margin-bottom: 6px;">
+                                                反復 <?= $item['iteration'] ?> 
+                                                <?php if (isset($item['similarity'])): ?>
+                                                    (類似度: <?= number_format($item['similarity'], 3) ?>)
+                                                <?php endif; ?>
+                                            </div>
+                                            <?php if (isset($item['image_url'])): ?>
+                                                <div style="margin-bottom: 8px;">
+                                                    <img src="<?= htmlspecialchars($item['image_url'], ENT_QUOTES, 'UTF-8') ?>" alt="生成画像" style="max-width: 200px; border-radius: 4px; border: 1px solid #1e293b;">
+                                                </div>
+                                            <?php endif; ?>
+                                            <div style="font-size: 0.85rem; line-height: 1.5; white-space: pre-wrap; word-break: break-word;">
+                                                <?= htmlspecialchars($item['prompt'] ?? '', ENT_QUOTES, 'UTF-8') ?>
+                                            </div>
+                                        </div>
+                                    <?php endif; ?>
                                 <?php endforeach; ?>
                             </div>
                         </div>

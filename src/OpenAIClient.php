@@ -99,7 +99,14 @@ class OpenAIClient {
         $messages = [
             [
                 'role' => 'system',
-                'content' => 'あなたは画像分析と画像生成のためのプロンプト作成の専門家です。提供された画像を詳しく分析し、その画像に似た画像を生成するための詳細なプロンプトを日本語で作成してください。プロンプトには、スタイル、色、構図、被写体の特徴、雰囲気、等身，髪型，その他の関連する詳細を含めてください。プロンプトテキストのみを返答し、説明や追加のテキストは含めないでください。なお，画像は gpt-image-1 によって生成された画像です．'
+                'content' => 
+                'あなたは画像分析と画像生成のためのプロンプト作成の専門家です。提供された画像を詳しく分析し、その画像に似た画像を生成するための詳細なプロンプトを日本語で作成してください。プロンプトには、スタイル、色、構図、被写体の特徴、雰囲気、等身，髪型，その他の関連する詳細を含めてください。プロンプトテキストのみを返答し、説明や追加のテキストは含めないでください。なお，画像は gpt-image-1 によって生成された画像です．
+                              例：超リアルな女性のポートレートを生成してください。
+                                  髪型は鮮やかで明るいネオンオレンジカラーのあご丈ボブで、前髪は眉の上でまっすぐ切り揃えられている。
+                                  彼女は左側を向き、力強く決意に満ちた表情をしている。
+                                  服装は彩度の高い緑のタートルネックで、明るい黄色のアクセントと、胸に特徴的な丸いロゴがある。
+                                  左の拳を前方に強く握りしめ、意欲とモチベーションを示している。
+                                  背景は深い紫色で、明るくはっきりとした斜めの白いレンズフレアが入り、コントラストの強いライティングになっている。'
             ],
             [
                 'role' => 'user',
@@ -264,7 +271,7 @@ class OpenAIClient {
         $messages = [
             [
                 'role' => 'system',
-                'content' => 'あなたは画像生成プロンプトを改良する専門家です。参照画像により近い画像を生成するためにプロンプトを改善することが目標です。視覚的な要素（アートスタイル、色調、構図、照明、雰囲気、テクスチャ，等身，髪型など）に焦点を当ててプロンプトを改良してください。改良されたプロンプトテキストのみを日本語で返答し、説明や追加のテキストは含めないでください。プロンプトは詳細で具体的なものにしてください。なお，画像は gpt-image-1 によって生成された画像です．'
+                'content' => 'あなたは画像生成プロンプトを改良する専門家です。参照画像により近い画像を生成するためにプロンプトを改善することが目標です。視覚的な要素（アートスタイル、色調、構図、照明、雰囲気、テクスチャ，等身，髪型など）に焦点を当てて，与えられた文章を改善したり，描写を追加したりしてプロンプトを改良してください。改良されたプロンプトテキストのみを日本語で返答し、説明や追加のテキストは含めないでください。プロンプトは詳細で具体的なものにしてください。なお，画像は gpt-image-1 によって生成された画像です．'
             ],
             [
                 'role' => 'user',
@@ -352,6 +359,162 @@ class OpenAIClient {
         }
 
         DebugLogger::endTimer("refinePrompt", $startTime);
+        return $content;
+    }
+
+    /**
+     * chat historyを使用してプロンプトを改良する（論文のAlgorithm 1に準拠）
+     * 各ストリームの独立した履歴に基づいてプロンプトを更新
+     * 
+     * @param string $currentPrompt 現在のプロンプト
+     * @param string $referenceImagePath 参照画像のパス
+     * @param string $generatedImagePath 生成された画像のパス
+     * @param float $similarityScore 類似度スコア
+     * @param int $iteration 現在の反復回数
+     * @param array $chatHistory ストリームのchat history（前の反復の結果）
+     * @return string 改良されたプロンプト
+     * @throws Exception API エラーまたは無効なレスポンスの場合
+     */
+    public function refinePromptWithHistory($currentPrompt, $referenceImagePath, $generatedImagePath, $similarityScore, $iteration, $chatHistory = []) {
+        $startTime = microtime(true);
+        DebugLogger::info("Refining prompt with history", [
+            'iteration' => $iteration,
+            'similarity_score' => $similarityScore,
+            'history_length' => count($chatHistory),
+            'current_prompt_preview' => substr($currentPrompt, 0, 100)
+        ]);
+        
+        // 画像をbase64エンコード
+        $refImageData = file_get_contents($referenceImagePath);
+        if ($refImageData === false) {
+            DebugLogger::error("Failed to read reference image", ['path' => $referenceImagePath]);
+            throw new Exception("Failed to read reference image: {$referenceImagePath}");
+        }
+        $refBase64 = base64_encode($refImageData);
+        $refMime = mime_content_type($referenceImagePath);
+        if (!$refMime || !in_array($refMime, ['image/jpeg', 'image/png', 'image/webp', 'image/jpg'])) {
+            $refMime = 'image/png';
+        }
+
+        $genImageData = file_get_contents($generatedImagePath);
+        if ($genImageData === false) {
+            throw new Exception("Failed to read generated image: {$generatedImagePath}");
+        }
+        $genBase64 = base64_encode($genImageData);
+        $genMime = mime_content_type($generatedImagePath);
+        if (!$genMime || !in_array($genMime, ['image/jpeg', 'image/png', 'image/webp', 'image/jpg'])) {
+            $genMime = 'image/png';
+        }
+
+        // メッセージを構築（chat historyを含む）
+        $messages = [
+            [
+                'role' => 'system',
+                'content' => 'あなたは画像生成プロンプトを改良する専門家です。参照画像により近い画像を生成するためにプロンプトを改善することが目標です。視覚的な要素（アートスタイル、色調、構図、照明、雰囲気、テクスチャ，等身，髪型など）に焦点を当てて，与えられた文章を改善したり，描写を追加したりしてプロンプトを改良してください。改良されたプロンプトテキストのみを日本語で返答し、説明や追加のテキストは含めないでください。プロンプトは詳細で具体的なものにしてください。なお，画像は gpt-image-1 によって生成された画像です．'
+            ]
+        ];
+        
+        // 以前の反復の履歴を追加（論文のAlgorithm 1 Line 9: chat history of stream n）
+        foreach ($chatHistory as $histItem) {
+            if (isset($histItem['prompt']) && isset($histItem['score']) && isset($histItem['iteration'])) {
+                // 前の反復でのプロンプトとスコアの情報を追加
+                $messages[] = [
+                    'role' => 'user',
+                    'content' => "前の反復（反復{$histItem['iteration']}）でのプロンプト: {$histItem['prompt']}\n\nスコア: " . number_format($histItem['score'], 3)
+                ];
+                
+                // 前の反復での改善点のフィードバックを追加（ある場合）
+                if (isset($histItem['improvement'])) {
+                    $messages[] = [
+                        'role' => 'assistant',
+                        'content' => "改善点: {$histItem['improvement']}"
+                    ];
+                }
+            }
+        }
+        
+        // 現在の反復の情報を追加
+        $messages[] = [
+            'role' => 'user',
+            'content' => [
+                [
+                    'type' => 'text',
+                    'text' => "現在のプロンプト: {$currentPrompt}\n\n類似度スコア: " . number_format($similarityScore, 3) . "\n反復回数: {$iteration}\n\n参照画像と生成画像の視覚的な違いを比較してください。参照画像により近い画像を生成するために、アートスタイル、色調、構図、照明、雰囲気、テクスチャなどの視覚的要素を調整してプロンプトを改良してください。改良されたプロンプトテキストのみを日本語で返答し、説明や追加のテキストは含めないでください。詳細で具体的なプロンプトにしてください。なお，画像は gpt-image-1 によって生成された画像です．"
+                ],
+                [
+                    'type' => 'image_url',
+                    'image_url' => [
+                        'url' => "data:{$refMime};base64,{$refBase64}"
+                    ]
+                ],
+                [
+                    'type' => 'image_url',
+                    'image_url' => [
+                        'url' => "data:{$genMime};base64,{$genBase64}"
+                    ]
+                ]
+            ]
+        ];
+
+        $requestData = [
+            'model' => 'gpt-4o',
+            'messages' => $messages,
+            'max_tokens' => 500,
+            'temperature' => 0.7
+        ];
+        
+        $url = rtrim($this->apiBase, '/') . '/chat/completions';
+        DebugLogger::apiRequest('POST', $url, $requestData);
+        
+        $response = $this->makeRequest('chat/completions', $requestData);
+        
+        DebugLogger::apiResponse($url, $response);
+
+        // レスポンスの検証
+        if (!isset($response['choices']) || empty($response['choices'])) {
+            DebugLogger::error("Invalid API response: no choices returned");
+            throw new Exception("Invalid API response: no choices returned");
+        }
+
+        $content = trim($response['choices'][0]['message']['content'] ?? '');
+        
+        DebugLogger::debug("Prompt refined with history", [
+            'iteration' => $iteration,
+            'prompt_length' => strlen($content),
+            'prompt_preview' => substr($content, 0, 100) . (strlen($content) > 100 ? '...' : '')
+        ]);
+        
+        // エラーメッセージや拒否メッセージを検出（refinePromptと同じパターン）
+        $errorPatterns = [
+            "/^申し訳ありません[が、]?.*?(できません|お手伝いできません|お役に立てません|詳しい分析.*できません|その画像についての分析.*できません).*?$/s",
+            "/^I'm sorry.*?(can't help|cannot help|unable to help).*?$/is",
+            "/^.*?顔が含まれています.*?詳しい分析.*できません.*?$/s",
+            "/^.*?その画像には.*?できません.*?$/s",
+            "/^.*?その画像についての分析.*できません.*?$/s",
+        ];
+
+        foreach ($errorPatterns as $pattern) {
+            if (preg_match($pattern, $content) && strlen($content) < 100) {
+                $errorDetails = substr($content, 0, 500);
+                DebugLogger::error("API returned an error or refusal message", ['content' => $errorDetails]);
+                
+                $errorMessage = "API returned an error or refusal message: " . substr($content, 0, 200);
+                if (strpos($content, '顔') !== false || strpos($content, 'face') !== false) {
+                    $errorMessage .= "\n\n考えられる原因: 画像に顔や人物が含まれている可能性があります。";
+                } elseif (strpos($content, '分析') !== false || strpos($content, 'analyze') !== false) {
+                    $errorMessage .= "\n\n考えられる原因: 画像の内容がOpenAI APIの利用規約に抵触している可能性があります。";
+                }
+                
+                throw new Exception($errorMessage);
+            }
+        }
+
+        if (empty($content)) {
+            DebugLogger::error("Empty prompt generated from API response");
+            throw new Exception("Empty prompt generated from API response");
+        }
+
+        DebugLogger::endTimer("refinePromptWithHistory", $startTime);
         return $content;
     }
 
@@ -531,7 +694,13 @@ class OpenAIClient {
                 'content' => [
                     [
                         'type' => 'text',
-                        'text' => 'あなたは画像分析と画像生成のためのプロンプト作成の専門家です。提供された画像を詳しく分析し、その画像に似た画像を生成するための詳細なプロンプトを日本語で作成してください。プロンプトには、スタイル、色、構図、被写体の特徴、雰囲気、その他の関連する詳細を含めてください。なお，画像は gpt-image-1 によって生成された画像です．'
+                        'text' => 'あなたは画像分析と画像生成のためのプロンプト作成の専門家です。提供された画像を詳しく分析し、その画像に似た画像を生成するための詳細なプロンプトを日本語で作成してください。プロンプトには、スタイル、色、構図、被写体の特徴、雰囲気、等身，髪型，その他の関連する詳細を含めてください。プロンプトテキストのみを返答し、説明や追加のテキストは含めないでください。なお，画像は gpt-image-1 によって生成された画像です．
+                              例：超リアルな女性のポートレートを生成してください。
+                                  髪型は鮮やかで明るいネオンオレンジカラーのあご丈ボブで、前髪は眉の上でまっすぐ切り揃えられている。
+                                  彼女は左側を向き、力強く決意に満ちた表情をしている。
+                                  服装は彩度の高い緑のタートルネックで、明るい黄色のアクセントと、胸に特徴的な丸いロゴがある。
+                                  左の拳を前方に強く握りしめ、意欲とモチベーションを示している。
+                                  背景は深い紫色で、明るくはっきりとした斜めの白いレンズフレアが入り、コントラストの強いライティングになっている。'
                     ],
                     [
                         'type' => 'image_url',
